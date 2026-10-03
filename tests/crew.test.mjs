@@ -122,3 +122,4 @@ test('new joins cannot steal offline reserved stations; replacement follows expl
   const observerVote = await h.request('sync', { token: tokens[2], code: a.code, command: cmd(result, 'hint') });
   assert.equal(observerVote.errorCode, 'NOT_ASSIGNED');
 });
+

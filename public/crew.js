@@ -13,3 +13,4 @@ const Crew = (() => {
   const canCheck = (state, id) => rolesForParticipant(state, id).includes(0) && allAssignedOnline(state);
   return { rolesForParticipant, voteEligibleIds, isOnline, allAssignedOnline, canCheck };
 })();
+

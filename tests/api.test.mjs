@@ -167,3 +167,4 @@ test('power controls reject coercible objects and arrays', async () => {
     assert.equal(result.status, 400);
   }
 });
+

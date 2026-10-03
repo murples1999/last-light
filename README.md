@@ -1,6 +1,6 @@
 # LAST LIGHT
 
-A cooperative browser escape-room game for three players, with a solo mode.
+A cooperative browser escape-room game for one, two or three players, with a separate offline solo mode.
 
 Live game: https://airlock-nine.murples.chatgpt.site
 
@@ -23,6 +23,8 @@ Rooms hold game state, hashed session identifiers and heartbeat timestamps. They
 
 - `public/`: interface and client-side game code
 - `public/power.js`: shared deterministic power-puzzle rules and station rendering
+- `public/crew.js`: shared participant and station ownership queries
+- `tests/`: backend and ownership regression tests (`node --test tests/*.test.mjs`)
 - `worker/api.js`: room validation, participant sessions, state changes and optimistic concurrency
 - `db/schema.ts`, `drizzle/`: database schema and generated migration history
 - `scripts/build.mjs`: embeds browser assets into the Worker
@@ -43,7 +45,7 @@ The generated entrypoint is `dist/server/index.js`, exporting `default.fetch(req
 
 Keep changes focused and submit a branch/PR for integration. Never commit credentials, runtime databases, player sessions or deployment secrets. Generated migrations already applied to production must remain immutable; add new migrations for later schema changes.
 
-Upcoming work: adaptive one-, two- and three-player station ownership, plus deeper signal/navigation interactions. The current multiplayer game still requires three connected players to advance and reveal a hint. Solo remains separately available.
+Online rooms adapt to one, two or three people. Players can own multiple stations and switch between station tabs. The coordinator can explicitly continue with fewer players or assign stations after a disconnect. Rejoining players never silently reclaim stations that were reassigned. Hint consent is unanimous per assigned person, rather than per station. A new level expansion is only a proposal and is not implemented.
 
 ## Third-party software
 

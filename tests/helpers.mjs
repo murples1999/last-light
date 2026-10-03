@@ -59,3 +59,4 @@ export async function room(h, count) {
   for (let i = 0; i < count; i++) players[i] = await h.request('sync', { token: tokens[i], code: players[0].code });
   return players;
 }
+
