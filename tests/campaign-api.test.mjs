@@ -383,3 +383,37 @@ test("concurrent campaign hints reveal once and a finale sub-checkpoint survives
   assert.equal(rejoin.state.campaign.views[0].progress.step, 1);
   assert.deepEqual(stored(h, r).campaign, prior);
 });
+
+test("restartCount identifies only explicit current-level restarts across projections and retries", async () => {
+  const h = harness();
+  let [r] = await campaignRoom(h);
+  assert.equal(r.state.campaign.restartCount, 0);
+  const initialEpoch = r.state.epoch;
+  for (let i = 0; i < 70; i++)
+    r = await act(h, r, "campaign-set", 0, { field: "feed0", value: "0" });
+  assert.notEqual(r.state.epoch, initialEpoch);
+  assert.equal(r.state.campaign.restartCount, 0);
+  const restart = cmd(r, "campaign-restart");
+  r = await h.request("sync", {
+    token: tokens[0],
+    code: r.code,
+    command: restart,
+  });
+  assert.equal(r.state.campaign.restartCount, 1);
+  r = await h.request("sync", {
+    token: tokens[0],
+    code: r.code,
+    command: restart,
+  });
+  assert.equal(r.state.campaign.restartCount, 1);
+  assert.equal(h.Campaign.project(stored(h, r).campaign, [1]).restartCount, 1);
+  r = await solvePhase(h, r);
+  r = await act(h, r, "campaign-next");
+  assert.equal(r.state.campaign.restartCount, 1);
+  const started = r.state.started;
+  h.advance(1);
+  r = await act(h, r, "reset");
+  assert.equal(r.state.mode, "campaign-v1");
+  assert.equal(r.state.campaign.restartCount, 0);
+  assert.ok(r.state.started > started);
+});

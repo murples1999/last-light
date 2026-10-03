@@ -231,6 +231,7 @@ const Campaign = (() => {
       checkpoint: null,
       puzzle: makePuzzle(0, seed),
       checks: 0,
+      restartCount: 0,
     };
   }
   function baseView(c, r) {
@@ -1033,6 +1034,7 @@ const Campaign = (() => {
       throw Error("Only an active level can be restarted");
     c.puzzle = makePuzzle(c.level, c.seed);
     c.checks = 0;
+    c.restartCount = (c.restartCount || 0) + 1;
   }
   function hints(c, count = 0) {
     if (c.views) return [...(c.hintTexts || [])];
@@ -1098,6 +1100,7 @@ const Campaign = (() => {
       completed: clone(c.completed),
       checkpoint: clone(c.checkpoint),
       checks: c.checks,
+      restartCount: c.restartCount || 0,
       views: Object.fromEntries(roles.map((r) => [r, view(c, r)])),
       hintTexts: hints(c, hintCount),
     };
