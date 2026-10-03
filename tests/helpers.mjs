@@ -9,7 +9,7 @@ export function harness() {
   const source = ['public/power.js', 'public/crew.js', 'worker/api.js'].map(p => readFileSync(new URL('../' + p, import.meta.url), 'utf8')).join('\n');
   vm.runInContext(source.replace('export async function api', 'async function api') + '\nglobalThis.testApi = api; globalThis.testCrew = Crew;', context);
   const rows = new Map();
-  let conflicts = 0, storageError = false;
+  let conflicts = 0, storageError = false, nextUpdateGate = null;
   const DB = { prepare(sql) { return { bind(...args) { return {
     async first() {
       if (storageError) throw Error('storage unavailable');
@@ -26,6 +26,10 @@ export function harness() {
         rows.set(code, { code, state, members, revision: 0, expires }); return {};
       }
       const [state, members, revision, code, previous] = args;
+      if (nextUpdateGate) {
+        const gate = nextUpdateGate; nextUpdateGate = null;
+        gate.enter(); await gate.wait;
+      }
       if (conflicts > 0) { conflicts--; return { meta: { changes: 0 } }; }
       const r = rows.get(code);
       if (r.revision !== previous) return { meta: { changes: 0 } };
@@ -37,7 +41,13 @@ export function harness() {
     const res = await context.testApi(req, { DB });
     return { status: res.status, ...(await res.json()) };
   }
-  return { request, rows, Crew: context.testCrew, now: () => now, advance: n => now += n, conflict: n => conflicts = n, storageError: value => storageError = value };
+  return { request, rows, Crew: context.testCrew, now: () => now, advance: n => now += n, conflict: n => conflicts = n, storageError: value => storageError = value, holdNextUpdate() {
+    let enter, release;
+    const entered = new Promise(resolve => enter = resolve);
+    const wait = new Promise(resolve => release = resolve);
+    nextUpdateGate = { enter, wait };
+    return { entered, release };
+  } };
 }
 export const tokens = ['a', 'b', 'c', 'd'].map(c => c.repeat(32));
 export function cmd(response, type, role = response.roles[0], extra = {}) {

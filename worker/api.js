@@ -121,6 +121,7 @@ function command(s, id, c) {
       const r = c.role;
       if (!Number.isInteger(r) || !Crew.rolesForParticipant(s, id).includes(r)) fail('This is another participant’s station', 403, 'NOT_STATION_OWNER');
       if (s.stage === 0 && c.type.startsWith('power-')) {
+        if (c.type === 'power-set' && (typeof c.field !== 'string' || typeof c.value !== 'string')) fail('Invalid station control');
         if (c.type === 'power-check' && !Crew.canCheck(s, id)) fail('Engineering can check when every assigned operator is online');
         try { Power.apply(s, r, c); } catch (e) { fail(e.message); }
         if (s.stage !== c.stage) s.hintVotes = {};
@@ -194,6 +195,9 @@ export async function api(req, env) {
       let s = JSON.parse(row.state), members = migrate(s, JSON.parse(row.members));
       let member = members.find(x => x.token === token);
       if (!member && path !== '/api/join') return json({ error: 'Session not in this room. Join again.' }, 403);
+      // A delayed poll must not undo an explicit leave when its CAS retries.
+      // Timeouts still reconnect through sync; an explicit leave requires join.
+      if (member?.seen === 0 && path !== '/api/join' && path !== '/api/leave') fail('Session has left this room. Join again.', 403, 'SESSION_LEFT');
       // Refresh other heartbeats before admitting a new person; reserved offline
       // stations are never silently stolen. Existing sessions may always return.
       if (member) {
