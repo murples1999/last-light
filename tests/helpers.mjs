@@ -6,8 +6,8 @@ export function harness() {
   let now = 100000;
   class Clock extends Date { static now() { return now; } }
   const context = vm.createContext({ crypto: webcrypto, Date: Clock, Response, Request, TextEncoder, URL, console });
-  const source = ['public/power.js', 'public/crew.js', 'worker/api.js'].map(p => readFileSync(new URL('../' + p, import.meta.url), 'utf8')).join('\n');
-  vm.runInContext(source.replace('export async function api', 'async function api') + '\nglobalThis.testApi = api; globalThis.testCrew = Crew;', context);
+  const source = ['public/campaign.js', 'public/power.js', 'public/crew.js', 'worker/api.js'].map(p => readFileSync(new URL('../' + p, import.meta.url), 'utf8')).join('\n');
+  vm.runInContext(source.replace('export async function api', 'async function api') + '\nglobalThis.testApi = api; globalThis.testCrew = Crew; globalThis.testCampaign = Campaign;', context);
   const rows = new Map();
   let conflicts = 0, storageError = false, nextUpdateGate = null;
   const DB = { prepare(sql) { return { bind(...args) { return {
@@ -41,7 +41,7 @@ export function harness() {
     const res = await context.testApi(req, { DB });
     return { status: res.status, ...(await res.json()) };
   }
-  return { request, rows, Crew: context.testCrew, now: () => now, advance: n => now += n, conflict: n => conflicts = n, storageError: value => storageError = value, holdNextUpdate() {
+  return { request, rows, Crew: context.testCrew, Campaign: context.testCampaign, now: () => now, advance: n => now += n, conflict: n => conflicts = n, storageError: value => storageError = value, holdNextUpdate() {
     let enter, release;
     const entered = new Promise(resolve => enter = resolve);
     const wait = new Promise(resolve => release = resolve);

@@ -1,9 +1,20 @@
-const TTL = 7200000, HEARTBEAT_TTL = 15000, MAX_PARTICIPANTS = 32;
+const TTL = 7200000, CAMPAIGN_TTL = 86400000, HEARTBEAT_TTL = 15000, MAX_PARTICIPANTS = 32;
 const ALPH = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const json = (x, status = 200) => new Response(JSON.stringify(x), { status, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
-const fresh = () => ({ stage: 0, power: Power.create(), epoch: crypto.randomUUID(), revision: 0,
+const classicFresh = () => ({ stage: 0, power: Power.create(), epoch: crypto.randomUUID(), revision: 0,
   values: { reactor: '1', antenna: '1', thruster: '1', first: '0', middle: '0', last: '0', pressure: '0', call: 'HOME', ring: '1', spoke: '1' },
   locks: [false, false, false], online: [true, false, false], hints: [0, 0, 0], hintVotes: {}, feedback: '', log: [], started: Date.now(), finished: null, recent: [] });
+function fresh(mode) {
+  const state = classicFresh();
+  if (mode === 'campaign-v1') {
+    state.mode = mode;
+    state.campaign = Campaign.create();
+    state.hints = Array(Campaign.TOTAL).fill(0);
+    delete state.power;
+    delete state.values;
+  }
+  return state;
+}
 const fields = [[['reactor', [1, 2, 3]], ['antenna', [1, 2, 3]], ['thruster', [1, 2, 3]]],
   [['first', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]], ['middle', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]], ['last', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]]],
   [['pressure', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]], ['call', ['HOME', 'DAWN', 'OPEN']], ['ring', [1, 2, 3]]]];
@@ -105,10 +116,21 @@ function command(s, id, c) {
   if (c.epoch !== s.epoch || c.stage !== s.stage) fail('Puzzle changed. Try again.', 409, 'STALE_PUZZLE');
   if (c.type === 'reset') {
     requireCoordinator(s, id);
-    s = { ...fresh(), crew: s.crew, online: s.online, recent: s.recent };
+    s = { ...fresh(s.mode), crew: s.crew, online: s.online, recent: s.recent };
   } else {
-    if (s.stage > 2) fail('Mission complete');
+    if (s.mode === 'campaign-v1' && ['campaign-next', 'campaign-restart'].includes(c.type)) {
+      requireCoordinator(s, id);
+      try { c.type === 'campaign-next' ? Campaign.next(s.campaign) : Campaign.restart(s.campaign); }
+      catch (e) { fail(e.message); }
+      s.stage = s.campaign.level;
+      s.epoch = crypto.randomUUID();
+      s.hintVotes = {};
+      s.locks = [false, false, false];
+      s.feedback = c.type === 'campaign-next' ? 'Next system online. Compare your new station notes.' : 'Current level restarted. Revealed hints are preserved.';
+    } else {
+    if (s.stage >= (s.mode === 'campaign-v1' ? Campaign.TOTAL : 3)) fail('Mission complete');
     if (c.type === 'hint') {
+      if (s.mode === 'campaign-v1' && s.campaign.status !== 'playing') fail('This level is already verified');
       if (!Crew.voteEligibleIds(s).includes(id)) fail('Only assigned operators can vote', 403, 'NOT_ASSIGNED');
       if (c.hintIndex !== s.hints[s.stage]) fail('Hint changed. Try again.', 409, 'STALE_HINT');
       if (s.hints[s.stage] >= 2) fail('All hints are already revealed');
@@ -120,7 +142,22 @@ function command(s, id, c) {
     } else {
       const r = c.role;
       if (!Number.isInteger(r) || !Crew.rolesForParticipant(s, id).includes(r)) fail('This is another participant’s station', 403, 'NOT_STATION_OWNER');
-      if (s.stage === 0 && c.type.startsWith('power-')) {
+      if (s.mode === 'campaign-v1') {
+        if (c.type === 'campaign-check' && !Crew.canCheck(s, id)) fail('Engineering can check when every assigned operator is online');
+        let result;
+        try { result = Campaign.apply(s.campaign, r, c); } catch (e) { fail(e.message); }
+        s.feedback = result.feedback;
+        if (result.solved) {
+          s.log.push('LEVEL ' + (c.stage + 1) + ': ' + Campaign.view(s.campaign, r).title + ' verified.');
+          s.hintVotes = {};
+          s.locks = [false, false, false];
+          s.stage = s.campaign.level;
+          if (s.campaign.status === 'complete') s.finished = Date.now();
+        }
+        // Finale phases share a level index; rotate the epoch so delayed phase
+        // controls cannot accidentally operate the next console.
+        if (result.phaseChanged) { s.epoch = crypto.randomUUID(); s.hintVotes = {}; }
+      } else if (s.stage === 0 && c.type.startsWith('power-')) {
         if (c.type === 'power-set' && (typeof c.field !== 'string' || typeof c.value !== 'string')) fail('Invalid station control');
         if (c.type === 'power-check' && !Crew.canCheck(s, id)) fail('Engineering can check when every assigned operator is online');
         try { Power.apply(s, r, c); } catch (e) { fail(e.message); }
@@ -151,6 +188,7 @@ function command(s, id, c) {
       } else fail('Unknown command');
     }
   }
+  }
   s.recent.push({ participantId: id, id: c.id, signature });
   s.recent = s.recent.slice(-100);
   return s;
@@ -160,6 +198,10 @@ function responseState(s, id, code) {
   const visible = { ...s };
   delete visible.recent;
   const roles = Crew.rolesForParticipant(s, id);
+  if (s.mode === 'campaign-v1') {
+    visible.campaign = Campaign.project(s.campaign, roles, s.hints[Math.min(s.stage, Campaign.TOTAL - 1)]);
+    if (s.crew.coordinatorId !== id) for (const view of Object.values(visible.campaign.views)) view.next = null;
+  }
   return { state: visible, participantId: id, roles, coordinator: s.crew.coordinatorId === id, role: roles[0] ?? null, code };
 }
 
@@ -176,14 +218,15 @@ export async function api(req, env) {
   const token = await hash(b.token), now = Date.now(), path = new URL(req.url).pathname;
   try {
     if (path === '/api/create') {
+      if (b.mode !== undefined && !['classic', 'campaign-v1'].includes(b.mode)) fail('Unknown room mode');
       await env.DB.prepare('DELETE FROM rooms WHERE expires < ?').bind(now).run();
       const active = await env.DB.prepare('SELECT COUNT(*) AS n FROM rooms WHERE expires > ?').bind(now).first();
       if (active.n >= 100) return json({ error: 'Room capacity reached. Please try again later.' }, 429);
       const code = Array.from(crypto.getRandomValues(new Uint8Array(8)), n => ALPH[n % 32]).join('');
-      const s = fresh(), id = crypto.randomUUID(), members = [{ id, token, seen: now }];
+      const s = fresh(b.mode), id = crypto.randomUUID(), members = [{ id, token, seen: now }];
       s.crew = { version: 1, coordinatorId: id, participants: [{ id, online: true }], stationOwners: [id, id, id] };
       s.online = [true, true, true];
-      await env.DB.prepare('INSERT INTO rooms(code,state,members,revision,expires) VALUES(?,?,?,0,?)').bind(code, JSON.stringify(s), JSON.stringify(members), now + TTL).run();
+      await env.DB.prepare('INSERT INTO rooms(code,state,members,revision,expires) VALUES(?,?,?,0,?)').bind(code, JSON.stringify(s), JSON.stringify(members), now + (s.mode === 'campaign-v1' ? CAMPAIGN_TTL : TTL)).run();
       return json(responseState(s, id, code));
     }
     if (!['/api/join', '/api/sync', '/api/leave', '/api/release', '/api/continue', '/api/assign'].includes(path)
