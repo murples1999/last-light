@@ -1,0 +1,6 @@
+import fs from 'node:fs';
+fs.rmSync('dist',{recursive:true,force:true});fs.mkdirSync('dist/server',{recursive:true});fs.mkdirSync('dist/.openai',{recursive:true});
+const assets={};for(const [file,type] of [['index.html','text/html'],['game.js','text/javascript'],['power.js','text/javascript'],['style.css','text/css'],['peerjs.min.js','text/javascript']])assets['/'+file]=[type,fs.readFileSync('public/'+file,'utf8')];
+const api=fs.readFileSync('public/power.js','utf8')+'\n'+fs.readFileSync('worker/api.js','utf8').replace('export async function api','async function api');
+fs.writeFileSync('dist/server/index.js',api+'\nconst assets='+JSON.stringify(assets)+';\nexport default {async fetch(request,env){const url=new URL(request.url);if(url.pathname.startsWith("/api/"))return api(request,env);const item=assets[url.pathname==="/"?"/index.html":url.pathname];if(!item)return new Response("Not found",{status:404});return new Response(item[1],{headers:{"Content-Type":item[0]+"; charset=utf-8","Cache-Control":"no-cache","X-Content-Type-Options":"nosniff"}});}};');
+fs.copyFileSync('.openai/hosting.json','dist/.openai/hosting.json');
