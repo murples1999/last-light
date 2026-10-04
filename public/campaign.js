@@ -1,7 +1,7 @@
 // Versioned, deterministic rules shared by the Worker and offline/browser clients.
 // Views are data, never HTML. They hide other roles' clues in normal play; public
 // source and the seed are intentionally not a confidentiality/security boundary.
-const Campaign = (() => {
+const CampaignV1 = (() => {
   const VERSION = 1,
     TOTAL = 10,
     SEEDS = 72;
@@ -1115,6 +1115,867 @@ const Campaign = (() => {
     apply,
     next,
     restart,
+    project,
+  };
+})();
+
+// Version 1 above is intentionally frozen: persisted rooms keep their original
+// rules through next/restart. Version 2 composes those foundations with coupled
+// planning, without migrating or replacing another crew's saved puzzle.
+const Campaign = (() => {
+  const V1 = CampaignV1;
+  const clone = (x) => JSON.parse(JSON.stringify(x));
+  const opt = (value, label = String(value)) => ({
+    value: String(value),
+    label,
+  });
+  const select = (field, label, value, options) => ({
+    field,
+    label,
+    value: String(value),
+    type: "select",
+    options,
+  });
+  const button = (field, label) => ({
+    field,
+    label,
+    value: field,
+    type: "button",
+  });
+  const reading = (label, value) => ({ label, value: String(value) });
+  const ops = ["cool", "vent", "release", "prime", "align", "launch"];
+  const labels = [
+    "Start coolant",
+    "Vent chamber",
+    "Release latch",
+    "Prime engine",
+    "Align beacon",
+    "Arm launch",
+  ];
+  const names = ["Engineering", "Communications", "Navigation"];
+  const cell = (n) =>
+    String.fromCharCode(65 + (n % 4)) + (1 + Math.floor(n / 4));
+  const rotate = (n, seed) => {
+    let x = n % 4,
+      y = Math.floor(n / 4);
+    for (let i = 0; i < seed % 4; i++) [x, y] = [3 - y, x];
+    return y * 4 + x;
+  };
+  const sum = (xs) => xs.reduce((a, b) => a + b, 0);
+  const profileTargets = (p) =>
+    p.values.busProfile === "drive"
+      ? { K7: 2, M4: 1, R2: 3 }
+      : { K7: 2, M4: 3, R2: 1 };
+  const output = (p, i) =>
+    p.isolate === i || (p.fault === i && p.alloc[i] > 1) ? 0 : p.alloc[i];
+  function totals(p) {
+    const t = { K7: 0, M4: 0, R2: 0 };
+    p.alloc.forEach((_, i) => {
+      const k = i === p.spare ? p.patch : p.routes[i];
+      if (k in t) t[k] += output(p, i);
+    });
+    return t;
+  }
+  function legacy(method, c, ...args) {
+    const version = c.version;
+    c.version = 1;
+    try {
+      return V1[method](c, ...args);
+    } finally {
+      c.version = version;
+    }
+  }
+  function synthetic(c, level, puzzle) {
+    return { ...c, version: 1, level, puzzle, status: "playing" };
+  }
+  function init(c) {
+    const p = c.puzzle;
+    if (c.level === 2 || c.level === 9) p.power.observations = [[], [], [], []];
+    if (c.level === 5) {
+      p.map = {
+        start: rotate(0, c.seed),
+        end: rotate(3, c.seed),
+        beacons: [rotate(1, c.seed), rotate(3, c.seed)],
+        blocked: [8, 9, 10, 11, 12, 13, 14, 15].map((n) => rotate(n, c.seed)),
+        radiation: [rotate(2, c.seed)],
+      };
+      p.route = [p.map.start];
+      p.values = { shielding: "0", beaconOrder: "BLUE-AMBER" };
+    }
+    if (c.level === 6) {
+      p.offset = c.seed % 3;
+      p.values.cargoPhase = "0";
+    }
+    if (c.level === 7) {
+      const t = V1.create(c.seed);
+      t.level = 3;
+      t.status = "checkpoint";
+      V1.next(t);
+      p.target = t.puzzle.target;
+      p.values = { frequency: "1", gain: "0", phase: "0" };
+    }
+    if (c.level === 8)
+      p.values = { branch: "0", exit: "0", boost: "0", phase: "0" };
+    if (c.level === 9)
+      Object.assign(p.values, { busProfile: "radio", flightRoute: "direct" });
+    return c;
+  }
+  function create(seed, options = {}) {
+    if (options.version === undefined || options.version === 1)
+      return V1.create(seed);
+    if (options.version !== 2) throw Error("Unsupported campaign version");
+    const c = V1.create(seed);
+    c.version = 2;
+    return init(c);
+  }
+  function supported(version) {
+    return version === 1 || version === 2;
+  }
+  function routeCost(p) {
+    return p.route.length - 1;
+  }
+  function routeError(p) {
+    if (p.route.at(-1) !== p.map.end)
+      return "The plotted route has not reached the exit.";
+    if (
+      p.route.indexOf(p.map.beacons[0]) < 0 ||
+      p.route.indexOf(p.map.beacons[0]) >= p.route.indexOf(p.map.beacons[1]) ||
+      p.values.beaconOrder !== "BLUE-AMBER"
+    )
+      return "Visit BLUE before AMBER and agree the BLUE-AMBER handshake.";
+    if (
+      p.values.shielding === "0" &&
+      p.route.some((n) => p.map.radiation.includes(n))
+    )
+      return "The economy plan crosses radiation. Engineering must enable shielding or Navigation must use the longer clear lane.";
+    if (routeCost(p) + Number(p.values.shielding) > 5)
+      return "Route and shielding exceed the five-unit flight reserve. Shorten the route or turn shielding off and avoid radiation; two launch units must remain.";
+    return "";
+  }
+  function networkPath(p) {
+    return [
+      "START",
+      ...(p.values.branch === "0"
+        ? ["SERVICE"]
+        : p.values.branch === "1"
+          ? ["BRIDGE", "SERVICE", "RELAY"]
+          : ["DEBRIS"]),
+      p.values.exit === "1" ? "HOME" : "LOOP",
+    ];
+  }
+  function networkError(p) {
+    const path = networkPath(p),
+      h = path.length - 1,
+      b = Number(p.values.boost);
+    if (
+      path.includes("DEBRIS") ||
+      !path.includes("SERVICE") ||
+      path.at(-1) !== "HOME"
+    )
+      return "Route through SERVICE, avoid DEBRIS and finish at HOME.";
+    if (p.values.branch === "0" && b !== 2)
+      return "The direct SERVICE link needs the two-unit booster. Use the longer relay path if Engineering chooses economy.";
+    if (h + b > 4)
+      return "Hops plus booster exceed the four-unit packet reserve. A boosted packet needs the shorter direct link.";
+    return Number(p.values.phase) !== (h + b / 2 + p.offset) % 3
+      ? "Phase disagrees with the selected path and booster. Recalculate the remainder after dividing hops + booster setting + offset by three."
+      : "";
+  }
+  function flight(p) {
+    const t = totals(p.power),
+      direct = p.values.flightRoute === "direct";
+    return {
+      distance: direct ? 3 : 5,
+      gain: direct ? 3 : 1,
+      fuel: t.R2 + 2,
+      gainCap: t.M4,
+    };
+  }
+  function flightTarget(p) {
+    const f = flight(p);
+    return {
+      ...p.target,
+      gain: f.gain,
+      phase: (p.target.phase + f.distance) % 4,
+    };
+  }
+  function tuneError(p, target = p.target) {
+    const a = p.values;
+    if (Number(a.frequency) !== target.frequency)
+      return "Carrier is noisy. Communications has the clean reference.";
+    if (Number(a.gain) + Number(a.frequency) !== target.frequency + target.gain)
+      return "Energy disagrees with this plan. Engineering must retune the amplifier for the selected route.";
+    if (
+      (Number(a.frequency) + Number(a.phase)) % 4 !==
+      (target.frequency + target.phase) % 4
+    )
+      return "Phase disagrees with this plan. Navigation must use the remainder after dividing carrier + phase by four.";
+    return "";
+  }
+  function diagnosticError(p) {
+    if (
+      ![1, 2].every((load) =>
+        (p.observations?.[p.fault] || []).some((t) => t.load === load),
+      )
+    )
+      return "Fault lockout needs recorded low- and high-load evidence on the same suspect feed. Communications selects a relay and records each load before isolation.";
+    return p.isolate !== p.fault
+      ? "The measured faulty feed is not isolated."
+      : "";
+  }
+  function repairError(p, target) {
+    const e = diagnosticError(p);
+    if (e) return e;
+    const t = totals(p);
+    return Object.keys(target).some((k) => t[k] !== target[k])
+      ? "Destination outputs disagree with the repair profile. Navigation has the targets; zero isolated or unpatched allocations to recover stranded reserve."
+      : "";
+  }
+  function combinedError(p) {
+    let e = repairError(p.power, profileTargets(p));
+    if (e) return e;
+    const f = flight(p);
+    if (f.distance > f.fuel)
+      return (
+        "Repair and route conflict: this bus profile provides " +
+        f.fuel +
+        " flight fuel, but the selected route needs " +
+        f.distance +
+        ". Revise the repair profile or choose the shorter route."
+      );
+    if (f.gain > f.gainCap)
+      return (
+        "Repair and signal conflict: the route needs gain " +
+        f.gain +
+        ", but the repaired radio bus supports only " +
+        f.gainCap +
+        ". Revise repair or flight plan."
+      );
+    return tuneError(p, flightTarget(p));
+  }
+  function evidenceView(v, p, r) {
+    if (r === 1) {
+      v.controls.push(button("recordLoad", "Record selected relay load"));
+      v.readings.push(
+        ...p.observations.map((ts, i) =>
+          reading(
+            "Relay " + "ABCD"[i] + " evidence",
+            [1, 2]
+              .map((load) => {
+                const t = ts.find((t) => t.load === load);
+                return (
+                  load + " in: " + (t ? t.output + " out" : "not recorded")
+                );
+              })
+              .join("; "),
+          ),
+        ),
+      );
+    }
+    if (r === 0) {
+      const stranded = p.alloc.reduce(
+        (n, a, i) =>
+          n +
+          (p.isolate === i || (i === p.spare && p.patch === "NONE") ? a : 0),
+        0,
+      );
+      v.readings.push(
+        reading(
+          "Stranded reserve",
+          stranded + " units on isolated or unpatched feeds",
+        ),
+      );
+    }
+    v.readings.push(
+      reading(
+        "Diagnostic lockout",
+        diagnosticError(p) || "Evidence recorded; faulty feed isolated",
+      ),
+    );
+  }
+  function sequenceView(c, p, r, finale = false) {
+    const v = V1.view(synthetic(c, 7, p), r),
+      e = finale ? combinedError(p) : tuneError(p);
+    v.controls = v.controls.map((control) => {
+      const index = ops.indexOf(control.field);
+      const ready = index === p.sequence.length && !(index >= 3 && e);
+      return {
+        ...control,
+        disabled: !ready,
+        reason: p.sequence.includes(control.field)
+          ? "Already complete"
+          : ready
+            ? "Ready"
+            : index >= 3 && e
+              ? e
+              : "Waiting for " +
+                names[(index - 1) % 3] +
+                ": " +
+                labels[index - 1],
+      };
+    });
+    v.readings.push(...v.controls.map((x) => reading(x.label, x.reason)));
+    if (!finale) {
+      const tv = V1.view(synthetic(c, 4, p), r);
+      v.controls.push(...tv.controls);
+      v.clues.push(...tv.clues);
+      v.readings.push(...tv.readings);
+      v.objective =
+        "Tune the shared signal while preparing startup; priming and launch require all signal conditions to hold.";
+    }
+    return v;
+  }
+  function view(c, r) {
+    if (c.version === 1) return V1.view(c, r);
+    if (c.version !== 2) throw Error("Unsupported campaign version");
+    if (!Number.isInteger(r) || r < 0 || r > 2) return null;
+    if (c.views) return c.views[r] ? clone(c.views[r]) : null;
+    const p = c.puzzle,
+      a = p.values;
+    // Compose complete descriptors before applying terminal-state presentation.
+    // Legacy checkpoint views remove controls; v2 still needs them to customize
+    // station options. The status block below strips controls exactly once.
+    let v = V1.view({ ...c, version: 1, status: "playing" }, r);
+    if (c.level === 2) evidenceView(v, p.power, r);
+    if (c.level === 3)
+      v.readings.push(
+        reading(
+          "Unique fragments",
+          new Set(Object.values(a)).size === 4
+            ? "All four unique"
+            : "Repeated fragments: draft incomplete",
+        ),
+      );
+    if (c.level === 5) {
+      v.objective =
+        "Choose shielding and a route together, visit BLUE then AMBER, and preserve two launch units from the seven-unit reserve.";
+      v.clues = [
+        "Columns A–D run left to right; rows 1–4 run top to bottom. Route edits are plans and spend no fuel.",
+      ];
+      if (r === 0) {
+        v.controls = [
+          select("shielding", "Radiation shielding", a.shielding, [
+            opt(0, "Economy: no shield cost"),
+            opt(2, "Shielded: reserve two units"),
+          ]),
+        ];
+        v.clues.push(
+          "Each move costs one unit. Shielding costs two and permits radiation cells: " +
+            p.map.radiation.map(cell).join(", ") +
+            ". Keep two units for launch; a shielded detour may exceed reserve.",
+        );
+      }
+      if (r === 1) {
+        v.clues.push(
+          "BLUE is " +
+            cell(p.map.beacons[0]) +
+            "; AMBER is " +
+            cell(p.map.beacons[1]) +
+            ". Visit BLUE first. Debris: " +
+            p.map.blocked.map(cell).join(", ") +
+            ".",
+        );
+      }
+      if (r === 2)
+        v.clues.push(
+          "Start " +
+            cell(p.map.start) +
+            ", exit " +
+            cell(p.map.end) +
+            ". Ask Engineering which lane its shielding permits; ask Communications for ordered beacons and debris.",
+        );
+      v.readings = [
+        reading("Plotted route", p.route.map(cell).join(" → ")),
+        reading("Planned move fuel", routeCost(p)),
+        reading("Shield allocation", a.shielding),
+        reading(
+          "Launch reserve remaining",
+          7 - routeCost(p) - Number(a.shielding),
+        ),
+        reading("Required launch reserve", 2),
+      ];
+      v.progress = {
+        step: routeCost(p) + Number(a.shielding),
+        total: 5,
+        label: "Planned flight allocation",
+      };
+    }
+    if (c.level === 6) {
+      if (r === 1) {
+        v.controls.push(
+          select(
+            "cargoPhase",
+            "Cargo beacon phase",
+            a.cargoPhase,
+            [0, 1, 2].map((n) => opt(n)),
+          ),
+        );
+        v.clues.push(
+          "The cargo beacon phase is the remainder after dividing Battery bay index + " +
+            p.offset +
+            " by three. Bay 1 has index 0; Bay 2 has index 1; Bay 3 has index 2.",
+        );
+      }
+      v.objective +=
+        " Match the beacon phase to the Battery bay; moving the heavy pair changes the signal.";
+      v.readings.push(reading("Cargo phase", a.cargoPhase));
+    }
+    if (c.level === 7) v = sequenceView(c, p, r);
+    if (c.level === 8) {
+      const path = networkPath(p),
+        b = Number(a.boost);
+      v.objective =
+        "Choose booster and route jointly within four units; phase must match both.";
+      if (r === 0) {
+        v.controls = [
+          select("boost", "Packet booster", a.boost, [
+            opt(0, "Economy: relay path"),
+            opt(2, "Boosted: direct link"),
+          ]),
+        ];
+        v.clues = [
+          "The booster costs two units and opens the direct SERVICE link. Without it use the longer relay path. Hops plus booster may not exceed four.",
+        ];
+      }
+      if (r === 1)
+        v.clues = [
+          "Phase is the remainder after dividing hops + booster setting + " +
+            p.offset +
+            " by three. Booster setting is 0 in economy and 1 when boosted.",
+        ];
+      if (r === 2) {
+        v.controls[0].options = [
+          opt(0, "A: direct SERVICE link"),
+          opt(1, "B: longer SERVICE relay"),
+          opt(2, "C: debris field"),
+        ];
+        v.clues = [
+          "Both direct and relay paths cross SERVICE. Direct requires Engineering's booster; relay uses more hops. Select HOME at the exit.",
+        ];
+      }
+      v.readings = [
+        reading("Packet path", path.join(" → ")),
+        reading("Hop cost", path.length - 1),
+        reading("Booster cost", b),
+        reading("Packet reserve used", path.length - 1 + b + " / 4"),
+      ];
+    }
+    if (c.level === 9) {
+      if (p.phase === 0) {
+        v = V1.view(synthetic(c, 2, p), r);
+        evidenceView(v, p.power, r);
+        const target = profileTargets(p);
+        v.objective =
+          "Repair the reserve and choose which bus receives the extra power. This decision constrains flight and signal.";
+        if (r === 0)
+          v.controls.push(
+            select("busProfile", "Repair bus profile", a.busProfile, [
+              opt("radio", "Radio-heavy: short direct lane"),
+              opt("drive", "Drive-heavy: long sheltered lane"),
+            ]),
+          );
+        if (r === 2) {
+          v.clues = [
+            "Profile targets: K7 oxygen " +
+              target.K7 +
+              ", M4 radio " +
+              target.M4 +
+              ", R2 drive " +
+              target.R2 +
+              ". Spare replaces the failed destination. Radio output caps gain; drive output + 2 sets flight fuel.",
+          ];
+          const t = totals(p.power);
+          v.readings = Object.keys(target).map((k) =>
+            reading(k + " target " + target[k], t[k]),
+          );
+          v.readings.push(
+            reading(
+              "Diagnostic lockout",
+              diagnosticError(p.power) ||
+                "Evidence recorded; faulty feed isolated",
+            ),
+          );
+        }
+      } else if (p.phase === 1) {
+        v = V1.view(synthetic(c, 4, { ...p, target: flightTarget(p) }), r);
+        if (r === 2)
+          v.controls.push(
+            select("flightRoute", "Escape route", a.flightRoute, [
+              opt("direct", "Direct: fuel 3, signal gain 3"),
+              opt("sheltered", "Sheltered: fuel 5, signal gain 1"),
+            ]),
+          );
+        v.controls.push(button("reviseRepair", "Revise repair profile"));
+        v.objective =
+          "Fit route and signal to the actual repaired buses; revise the repair if this flight plan conflicts.";
+      } else {
+        v = sequenceView(c, p, r, true);
+        v.controls.push(
+          button("reviseFlight", "Revise flight plan"),
+          button("reviseRepair", "Revise repair profile"),
+        );
+        v.objective =
+          "Launch only while repaired buses, route and signal still agree. Revisions safely release downstream interlocks.";
+      }
+      const f = flight(p);
+      v.number = 10;
+      v.id = "last-light-10";
+      v.title = "Last Light";
+      v.briefing =
+        "A repaired ship is not yet a flyable ship. Every station's plan must fit the same reserve.";
+      v.learningGoal =
+        "Reconcile repair, route, signal and startup constraints by revising a shared plan.";
+      v.readings.push(
+        reading("Repaired flight fuel", f.fuel),
+        reading("Repaired maximum gain", f.gainCap),
+        reading("Route fuel needed", f.distance),
+        reading("Route gain needed", f.gain),
+        reading("Launch reserve", 1 + f.fuel - f.distance),
+      );
+      v.progress = {
+        step: p.phase,
+        total: 3,
+        label: [
+          "Repair and bus profile",
+          "Coupled flight plan",
+          "Launch interlocks",
+        ][p.phase],
+      };
+      v.submitInstruction =
+        "Engineering checks the combined plan. Revision keeps diagnostic evidence and allocations, but clears downstream launch certification.";
+    }
+    if ([4, 7, 8, 9].includes(c.level))
+      v.clues = v.clues
+        .map((s) =>
+          s.replace(
+            /\(carrier \+ phase\) modulo 4 must equal/g,
+            "add carrier + phase, divide by four, and the remainder must equal",
+          ),
+        )
+        .concat(
+          "Remainder example: 11 divided by 4 is two full groups with 3 left over, so its remainder is 3.",
+        );
+    if (c.level >= 5 && c.level < 9)
+      v.submitInstruction =
+        "Share the route, reserve and signal consequences before committing. Engineering checks when all stations agree.";
+    if (c.status !== "playing") {
+      v.controls = [];
+      v.check = null;
+      v.status = c.status;
+      v.submitInstruction =
+        c.status === "complete"
+          ? "The escape pod is ready. Mission complete."
+          : "Checkpoint saved. The coordinator chooses when to continue.";
+      v.next =
+        c.status === "checkpoint"
+          ? { label: "Continue to next level", coordinatorOnly: true }
+          : null;
+      v.progress = {
+        step: 1,
+        total: 1,
+        label: c.status === "complete" ? "Mission complete" : "Level verified",
+      };
+    }
+    return v;
+  }
+  function error(c) {
+    const p = c.puzzle;
+    if (c.level === 2) return repairError(p.power, { K7: 2, M4: 3, R2: 1 });
+    if (c.level === 5) return routeError(p);
+    if (c.level === 6) {
+      const t = clone(c);
+      delete t.puzzle.values.cargoPhase;
+      const result = legacy("apply", t, 0, { type: "campaign-check" });
+      if (!result.solved) return result.feedback;
+      return Number(p.values.cargoPhase) !==
+        (Number(p.values.crate2) + p.offset) % 3
+        ? "Cargo balances, but the beacon phase refers to a different Battery bay. Retune after moving the heavy pair."
+        : "";
+    }
+    if (c.level === 7)
+      return (
+        tuneError(p) ||
+        (p.sequence.length === 6
+          ? ""
+          : "Startup is incomplete. Read each station's ready prerequisite.")
+      );
+    if (c.level === 8) return networkError(p);
+    if (c.level === 9)
+      return p.phase === 0
+        ? repairError(p.power, profileTargets(p))
+        : combinedError(p) ||
+            (p.phase === 2 && p.sequence.length !== 6
+              ? "Final startup is incomplete."
+              : "");
+    return "";
+  }
+  function finish(c) {
+    c.completed.push({ level: c.level, checks: c.checks });
+    c.checkpoint = { level: c.level, completed: c.completed.length };
+    c.status = c.level === 9 ? "complete" : "checkpoint";
+    if (c.status === "complete") c.level = 10;
+    return {
+      feedback:
+        c.status === "complete"
+          ? "Escape pod ready. Mission complete."
+          : "Level verified. Checkpoint saved; continue when everyone is ready.",
+      solved: true,
+    };
+  }
+  function apply(c, r, command) {
+    if (c.version === 1) return V1.apply(c, r, command);
+    if (c.version !== 2) throw Error("Unsupported campaign version");
+    if (c.status !== "playing")
+      throw Error(
+        "This level is already verified. Wait for the coordinator to continue.",
+      );
+    if (!Number.isInteger(r) || r < 0 || r > 2) throw Error("Invalid station");
+    const p = c.puzzle;
+    if (
+      command.type === "campaign-check" &&
+      [2, 5, 6, 7, 8, 9].includes(c.level)
+    ) {
+      if (r !== 0) throw Error("Engineering runs the system check");
+      c.checks++;
+      const e = error(c);
+      if (e) return { feedback: "Check " + c.checks + ": " + e, solved: false };
+      if (c.level === 9 && p.phase < 2) {
+        p.phase++;
+        return {
+          feedback:
+            "Combined plan verified. Continue to " +
+            (p.phase === 1 ? "flight planning." : "launch interlocks."),
+          phaseChanged: true,
+          solved: false,
+        };
+      }
+      return finish(c);
+    }
+    if (command.type === "campaign-check")
+      return legacy("apply", c, r, command);
+    const control = view(c, r).controls.find((x) => x.field === command.field);
+    if (
+      !control ||
+      typeof command.value !== "string" ||
+      control.type !==
+        (command.type === "campaign-set"
+          ? "select"
+          : command.type === "campaign-action"
+            ? "button"
+            : "invalid") ||
+      (control.type === "select"
+        ? !control.options.some((x) => x.value === command.value)
+        : control.value !== command.value)
+    )
+      throw Error("Invalid station control or value");
+    const field = command.field;
+    if (field === "recordLoad") {
+      const q = p.power,
+        i = q.trace,
+        load = q.alloc[i];
+      if (q.isolate === i || ![1, 2].includes(load))
+        return {
+          feedback:
+            "Record a non-isolated feed at exactly 1 or 2 input units. Ask Engineering to set that load first.",
+          solved: false,
+        };
+      q.observations[i] = q.observations[i]
+        .filter((t) => t.load !== load)
+        .concat([{ load, output: output(q, i) }])
+        .sort((a, b) => a.load - b.load);
+      return {
+        feedback: "Relay " + "ABCD"[i] + " load comparison recorded.",
+        solved: false,
+      };
+    }
+    if (field === "reviseRepair" || field === "reviseFlight") {
+      p.phase = field === "reviseRepair" ? 0 : 1;
+      p.sequence = [];
+      return {
+        feedback:
+          "Plan reopened. Diagnostic evidence and allocations are kept; downstream launch interlocks were reset.",
+        phaseChanged: true,
+        solved: false,
+      };
+    }
+    if (
+      command.type === "campaign-set" &&
+      [
+        "shielding",
+        "cargoPhase",
+        "boost",
+        "busProfile",
+        "flightRoute",
+      ].includes(field)
+    ) {
+      p.values[field] = command.value;
+      return {
+        feedback:
+          field === "busProfile"
+            ? "Bus targets changed. Reallocate existing reserve before checking; no power was added."
+            : "Plan updated. Recheck coupled conditions before committing.",
+        solved: false,
+      };
+    }
+    if (c.level === 7 || (c.level === 9 && p.phase === 2)) {
+      if (command.type === "campaign-set") {
+        if (p.values[field] === command.value)
+          return {
+            feedback:
+              "Signal setting unchanged; completed operations are preserved.",
+            solved: false,
+          };
+        p.values[field] = command.value;
+        if (p.sequence.length > 3) p.sequence = p.sequence.slice(0, 3);
+        return {
+          feedback:
+            "Signal updated. Coolant, vent and latch remain safe; repeat prime, alignment and launch.",
+          solved: false,
+        };
+      }
+      const index = ops.indexOf(field),
+        e = c.level === 9 ? combinedError(p) : tuneError(p);
+      if (index !== p.sequence.length)
+        return {
+          feedback: p.sequence.includes(field)
+            ? "That operation is already complete."
+            : "Safety interlock: waiting for " +
+              (labels[p.sequence.length] || "system check") +
+              " (" +
+              names[p.sequence.length % 3] +
+              ").",
+          solved: false,
+        };
+      if (index >= 3 && e)
+        return { feedback: "Safety interlock: " + e, solved: false };
+      p.sequence.push(field);
+      return { feedback: labels[index] + " complete.", solved: false };
+    }
+    if (c.level === 9) {
+      if (p.phase === 1) {
+        p.values[field] = command.value;
+        return { feedback: "Flight signal updated.", solved: false };
+      }
+      const shadow = synthetic(c, 2, p);
+      const result = V1.apply(shadow, r, command);
+      return result;
+    }
+    if (c.level === 5 && command.type === "campaign-action") {
+      if (["clear", "undo"].includes(field)) {
+        if (field === "clear") p.route = [p.map.start];
+        else if (p.route.length > 1) p.route.pop();
+        return { feedback: "Route revised. No fuel was spent.", solved: false };
+      }
+      const at = p.route.at(-1),
+        delta = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] }[
+          field
+        ],
+        x = (at % 4) + delta[0],
+        y = Math.floor(at / 4) + delta[1],
+        n = y * 4 + x;
+      if (
+        x < 0 ||
+        x > 3 ||
+        y < 0 ||
+        y > 3 ||
+        p.map.blocked.includes(n) ||
+        p.route.includes(n) ||
+        p.route.length >= 6
+      )
+        return {
+          feedback:
+            "Route unchanged: grid boundary, debris, repeated cell or five-move planning limit. Undo to revise.",
+          solved: false,
+        };
+      if (p.values.shielding === "0" && p.map.radiation.includes(n))
+        return {
+          feedback:
+            "Radiation lane needs Engineering's shielding. Use the longer clear lane or revise shielding.",
+          solved: false,
+        };
+      p.route.push(n);
+      return {
+        feedback:
+          "Route planned. Fuel is calculated automatically; compare remaining launch reserve.",
+        solved: false,
+      };
+    }
+    return legacy("apply", c, r, command);
+  }
+  function next(c) {
+    if (c.version === 1) return V1.next(c);
+    if (c.version !== 2) throw Error("Unsupported campaign version");
+    legacy("next", c);
+    init(c);
+  }
+  function restart(c) {
+    if (c.version === 1) return V1.restart(c);
+    if (c.version !== 2) throw Error("Unsupported campaign version");
+    legacy("restart", c);
+    init(c);
+  }
+  function hints(c, count = 0) {
+    if (c.version === 1) return V1.hints(c, count);
+    if (c.views) return [...(c.hintTexts || [])];
+    const pairs = {
+      2: [
+        "Record the same fixed feed at one and two units before isolation.",
+        "Zero stranded allocations; patch the spare to the measured faulty destination.",
+      ],
+      5: [
+        "Shielding opens the short radiation lane but consumes two reserve units.",
+        "Economy supports the five-move clear detour; shielding needs a three-move route to keep two launch units.",
+      ],
+      6: [
+        "Balance crates, then communicate the Battery bay to Communications.",
+        "Cargo phase is Battery bay index plus the offset, keeping the remainder after division by three.",
+      ],
+      7: [
+        "Tune signal in parallel with coolant, vent and latch preparation.",
+        "Priming, alignment and launch require a valid signal. Retuning safely resets those last three steps.",
+      ],
+      8: [
+        "Direct SERVICE needs the booster; the longer relay path needs economy.",
+        "Count hops plus booster cost for reserve. Phase uses hops plus booster setting (0 or 1) plus offset, remainder three.",
+      ],
+      9: [
+        "Radio-heavy repair supports the short high-gain lane; drive-heavy supports the long low-gain lane.",
+        "If route and repair conflict, reopen repair, rebalance its targets, then retune signal. Revisions keep evidence and safely reset startup.",
+      ],
+    };
+    const n = Number.isInteger(count) ? Math.max(0, Math.min(2, count)) : 0;
+    return pairs[c.level]
+      ? pairs[c.level].slice(0, n)
+      : V1.hints({ ...c, version: 1 }, count);
+  }
+  function project(c, roles, hintCount = 0) {
+    if (c.version === 1) return V1.project(c, roles, hintCount);
+    return {
+      version: c.version,
+      seed: c.seed,
+      level: c.level,
+      total: 10,
+      status: c.status,
+      completed: clone(c.completed),
+      checkpoint: clone(c.checkpoint),
+      checks: c.checks,
+      restartCount: c.restartCount || 0,
+      views: Object.fromEntries(roles.map((r) => [r, view(c, r)])),
+      hintTexts: hints(c, hintCount),
+    };
+  }
+  return {
+    VERSION: 2,
+    TOTAL: V1.TOTAL,
+    SEEDS: V1.SEEDS,
+    supportsVersion: supported,
+    create,
+    createLegacy: V1.create,
+    view,
+    apply,
+    next,
+    restart,
+    hints,
     project,
   };
 })();

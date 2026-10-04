@@ -87,7 +87,7 @@ test("only explicit new campaign rooms use 24-hour TTL, classic remains two hour
   assert.equal(h.rows.get(c.code).expires - h.now(), 86400000);
   assert.equal(h.rows.get(classic.code).expires - h.now(), 7200000);
   assert.equal(
-    (await h.request("create", { token: tokens[2], mode: "campaign-v2" }))
+    (await h.request("create", { token: tokens[2], mode: "campaign-v3" }))
       .status,
     400,
   );

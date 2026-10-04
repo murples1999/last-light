@@ -38,11 +38,14 @@ const classicFresh = () => ({
   finished: null,
   recent: [],
 });
+const isCampaign = (s) => ["campaign-v1", "campaign-v2"].includes(s?.mode);
 function fresh(mode) {
   const state = classicFresh();
-  if (mode === "campaign-v1") {
+  if (isCampaign({ mode })) {
     state.mode = mode;
-    state.campaign = Campaign.create();
+    state.campaign = Campaign.create(undefined, {
+      version: mode === "campaign-v2" ? 2 : 1,
+    });
     state.hints = Array(Campaign.TOTAL).fill(0);
     delete state.power;
     delete state.values;
@@ -250,7 +253,7 @@ function command(s, id, c) {
     s = { ...fresh(s.mode), crew: s.crew, online: s.online, recent: s.recent };
   } else {
     if (
-      s.mode === "campaign-v1" &&
+      isCampaign(s) &&
       ["campaign-next", "campaign-restart"].includes(c.type)
     ) {
       requireCoordinator(s, id);
@@ -283,10 +286,10 @@ function command(s, id, c) {
             : "Next system online. You still operate all three stations."
           : "Current level restarted. Revealed hints are preserved.";
     } else {
-      if (s.stage >= (s.mode === "campaign-v1" ? Campaign.TOTAL : 3))
+      if (s.stage >= (isCampaign(s) ? Campaign.TOTAL : 3))
         fail("Mission complete");
       if (c.type === "hint") {
-        if (s.mode === "campaign-v1" && s.campaign.status !== "playing")
+        if (isCampaign(s) && s.campaign.status !== "playing")
           fail("This level is already verified");
         if (!Crew.voteEligibleIds(s).includes(id))
           fail("Only assigned operators can vote", 403, "NOT_ASSIGNED");
@@ -312,7 +315,7 @@ function command(s, id, c) {
             403,
             "NOT_STATION_OWNER",
           );
-        if (s.mode === "campaign-v1") {
+        if (isCampaign(s)) {
           if (c.type === "campaign-check" && !Crew.canCheck(s, id))
             fail(
               "Engineering can check when every assigned operator is online",
@@ -337,8 +340,8 @@ function command(s, id, c) {
             s.stage = s.campaign.level;
             if (s.campaign.status === "complete") s.finished = Date.now();
           }
-          // Finale phases share a level index; rotate the epoch so delayed phase
-          // controls cannot accidentally operate the next console.
+          // Forward and backward finale workspace changes share a level index;
+          // rotate the epoch so delayed controls cannot operate a reopened console.
           if (result.phaseChanged) {
             s.epoch = crypto.randomUUID();
             s.hintVotes = {};
@@ -414,14 +417,14 @@ function command(s, id, c) {
     participantId: id,
     id: c.id,
     signature,
-    ...(s.mode === "campaign-v1" ? { epoch: c.epoch } : {}),
+    ...(isCampaign(s) ? { epoch: c.epoch } : {}),
   });
   // A live epoch has at most 64 accepted campaign commands. Keep its entire
   // receipt history inside the bounded dedup window: once a receipt is evicted,
   // its epoch is necessarily stale and cannot execute again. Maintenance
   // rollover changes no puzzle, hint, vote, roster or checkpoint data.
   if (
-    s.mode === "campaign-v1" &&
+    isCampaign(s) &&
     c.epoch === s.epoch &&
     s.recent.filter((x) => x.epoch === s.epoch).length >= 64
   )
@@ -434,7 +437,7 @@ function responseState(s, id, code) {
   const visible = { ...s };
   delete visible.recent;
   const roles = Crew.rolesForParticipant(s, id);
-  if (s.mode === "campaign-v1") {
+  if (isCampaign(s)) {
     visible.campaign = Campaign.project(
       s.campaign,
       roles,
@@ -476,7 +479,10 @@ export async function api(req, env) {
     path = new URL(req.url).pathname;
   try {
     if (path === "/api/create") {
-      if (b.mode !== undefined && !["classic", "campaign-v1"].includes(b.mode))
+      if (
+        b.mode !== undefined &&
+        !["classic", "campaign-v1", "campaign-v2"].includes(b.mode)
+      )
         fail("Unknown room mode");
       await env.DB.prepare("DELETE FROM rooms WHERE expires < ?")
         .bind(now)
@@ -512,7 +518,7 @@ export async function api(req, env) {
           code,
           JSON.stringify(s),
           JSON.stringify(members),
-          now + (s.mode === "campaign-v1" ? CAMPAIGN_TTL : TTL),
+          now + (isCampaign(s) ? CAMPAIGN_TTL : TTL),
         )
         .run();
       return json(responseState(s, id, code));
@@ -545,6 +551,12 @@ export async function api(req, env) {
         );
       let s = JSON.parse(row.state),
         members = migrate(s, JSON.parse(row.members));
+      if (
+        isCampaign(s) && (
+          !Campaign.supportsVersion(s.campaign?.version) ||
+          s.campaign.version !== (s.mode === "campaign-v2" ? 2 : 1)
+        )
+      ) fail("Unsupported saved campaign version", 409, "UNSUPPORTED_CAMPAIGN");
       let member = members.find((x) => x.token === token);
       if (!member && path !== "/api/join")
         return json({ error: "Session not in this room. Join again." }, 403);
