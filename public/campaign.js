@@ -1432,7 +1432,10 @@ const Campaign = (() => {
     if (c.views) return c.views[r] ? clone(c.views[r]) : null;
     const p = c.puzzle,
       a = p.values;
-    let v = V1.view({ ...c, version: 1 }, r);
+    // Compose complete descriptors before applying terminal-state presentation.
+    // Legacy checkpoint views remove controls; v2 still needs them to customize
+    // station options. The status block below strips controls exactly once.
+    let v = V1.view({ ...c, version: 1, status: "playing" }, r);
     if (c.level === 2) evidenceView(v, p.power, r);
     if (c.level === 3)
       v.readings.push(

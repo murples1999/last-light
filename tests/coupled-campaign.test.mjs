@@ -69,6 +69,25 @@ test("all 72 version-two seeds solve every level, both finale profiles and seria
           `seed ${seed} level ${level} phase ${phase}: ${result.feedback}`,
         );
       }
+      // Check every completed station view, not only the Engineering check owner.
+      // Relay API saves the checkpoint before projecting all stations for solo crews.
+      c = copy(c);
+      const checkpointBefore = copy(c);
+      for (const role of [0, 1, 2]) {
+        const completedView = C.view(c, role);
+        assert.deepEqual(copy(completedView.controls), []);
+        assert.equal(completedView.check, null);
+        assert.equal(completedView.status, level === 9 ? "complete" : "checkpoint");
+        if (level < 9) assert.equal(completedView.next.coordinatorOnly, true);
+        else assert.equal(completedView.next, null);
+      }
+      for (const roles of [[0], [1], [2], [0, 1], [0, 1, 2]]) {
+        const savedProjection = copy(C.project(c, roles, 2));
+        for (const role of roles) {
+          assert.deepEqual(copy(C.view(savedProjection, role)), copy(C.view(c, role)));
+        }
+      }
+      assert.deepEqual(copy(c), checkpointBefore, "checkpoint projection is pure after reload");
       if (level < 9) {
         assert.equal(c.status, "checkpoint");
         assert.match(C.view(c, 0).submitInstruction, /coordinator.*continue/);
