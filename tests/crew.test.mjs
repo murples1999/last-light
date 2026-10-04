@@ -123,3 +123,34 @@ test('new joins cannot steal offline reserved stations; replacement follows expl
   assert.equal(observerVote.errorCode, 'NOT_ASSIGNED');
 });
 
+
+for (const count of [2, 3]) test(`${count}-player randomized rotation is fair across repeated blocks`, () => {
+  const { Crew } = harness();
+  const outcomes = new Set();
+  for (let seed = 0; seed < 128; seed++) {
+    let n = (seed * 2654435761 + 1) >>> 0;
+    const random = () => ((n = (1664525 * n + 1013904223) >>> 0) / 2 ** 32);
+    let owners = count === 3 ? ['a', 'b', 'c'] : ['a', 'b', 'a'], rotation;
+    const history = [owners];
+    for (let level = 1; level < 60; level++) {
+      const next = Crew.nextRotation(owners, rotation, random);
+      if (level === 1) outcomes.add(JSON.stringify(next.owners));
+      if (count === 3) assert.ok(next.owners.every((id, r) => id !== owners[r]));
+      else for (const id of ['a', 'b'])
+        assert.notEqual(next.owners.filter(x => x === id).length, owners.filter(x => x === id).length);
+      ({ owners, rotation } = JSON.parse(JSON.stringify(next)));
+      history.push(owners);
+    }
+    const block = count === 3 ? 3 : 6;
+    for (let start = 0; start < history.length; start += block)
+      for (const id of count === 3 ? ['a', 'b', 'c'] : ['a', 'b'])
+        for (let role = 0; role < 3; role++)
+          assert.equal(history.slice(start, start + block).filter(x => x[role] === id).length, count === 3 ? 1 : 3);
+  }
+  assert.equal(outcomes.size, 2, 'both random directions are reachable');
+});
+
+test('solo rotation preserves all stations without drawing randomness', () => {
+  const next = harness().Crew.nextRotation(['a', 'a', 'a'], null, () => assert.fail('solo rerolled'));
+  same(next.owners, ['a', 'a', 'a']);
+});

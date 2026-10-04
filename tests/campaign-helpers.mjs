@@ -30,7 +30,7 @@ const action = (role, field) => ({
 
 // Enumerate finite candidate settings and ask the model itself to validate each.
 // Test-only access to authoritative puzzle data is never shipped to the browser.
-export function solution(C, c, { enumerate = false } = {}) {
+function legacySolution(C, c, { enumerate = false } = {}) {
   const p = c.puzzle,
     level = c.level === 9 ? [2, 4, 7][p.phase] : c.level;
   if (level === 0) {
@@ -208,6 +208,103 @@ export function solution(C, c, { enumerate = false } = {}) {
     ];
   }
   throw Error("No solution for level " + level);
+}
+export function solution(C, c, options = {}) {
+  if (c.version === 1 || c.level < 2 || [3, 4].includes(c.level))
+    return legacySolution(C, c, options);
+  const p = c.puzzle;
+  if (c.level === 2 || (c.level === 9 && p.phase === 0)) {
+    const q = p.power,
+      target =
+        c.level === 9 && p.values.busProfile === "drive"
+          ? { K7: 2, M4: 1, R2: 3 }
+          : { K7: 2, M4: 3, R2: 1 };
+    return [
+      ...q.alloc.map((_, i) => set(0, "feed" + i, 0)),
+      set(1, "isolate", -1),
+      set(1, "trace", q.fault),
+      set(0, "feed" + q.fault, 1),
+      action(1, "recordLoad"),
+      set(0, "feed" + q.fault, 2),
+      action(1, "recordLoad"),
+      set(0, "feed" + q.fault, 0),
+      set(1, "isolate", q.fault),
+      set(2, "patch", q.routes[q.fault]),
+      ...q.alloc.map((_, i) =>
+        set(
+          0,
+          "feed" + i,
+          i === q.fault
+            ? 0
+            : target[i === q.spare ? q.routes[q.fault] : q.routes[i]],
+        ),
+      ),
+    ];
+  }
+  if (c.level === 5) {
+    const rotate = (n) => {
+      let x = n % 4,
+        y = Math.floor(n / 4);
+      for (let i = 0; i < c.seed % 4; i++) [x, y] = [3 - y, x];
+      return y * 4 + x;
+    };
+    const path = [0, 1, 2, 3].map(rotate);
+    return [
+      action(2, "clear"),
+      set(0, "shielding", 2),
+      ...path
+        .slice(1)
+        .map((n, i) =>
+          action(
+            2,
+            n - path[i] === 1
+              ? "east"
+              : n - path[i] === -1
+                ? "west"
+                : n - path[i] === 4
+                  ? "south"
+                  : "north",
+          ),
+        ),
+      set(1, "beaconOrder", "BLUE-AMBER"),
+    ];
+  }
+  if (c.level === 6) {
+    const plan = legacySolution(C, { ...copy(c), version: 1 }, options);
+    const bay = Number(plan.find((x) => x.field === "crate2").value);
+    return [...plan, set(1, "cargoPhase", (bay + p.offset) % 3)];
+  }
+  if (c.level === 7)
+    return [
+      ...legacySolution(C, { ...copy(c), version: 1, level: 4 }),
+      ...operations.map((op, i) => action(i % 3, op)),
+    ];
+  if (c.level === 8)
+    return [
+      set(0, "boost", 0),
+      set(2, "branch", 1),
+      set(2, "exit", 1),
+      set(1, "phase", (4 + p.offset) % 3),
+    ];
+  if (c.level === 9 && p.phase === 1) {
+    const direct = p.values.busProfile !== "drive",
+      distance = direct ? 3 : 5;
+    const t = copy(c);
+    t.version = 1;
+    t.level = 4;
+    t.puzzle.target = {
+      ...p.target,
+      gain: direct ? 3 : 1,
+      phase: (p.target.phase + distance) % 4,
+    };
+    return [
+      set(2, "flightRoute", direct ? "direct" : "sheltered"),
+      ...legacySolution(C, t),
+    ];
+  }
+  if (c.level === 9 && p.phase === 2)
+    return operations.map((op, i) => action(i % 3, op));
+  throw Error("No version 2 solution for level " + c.level);
 }
 export function solveModel(C, c, options) {
   for (const command of solution(C, c, options))

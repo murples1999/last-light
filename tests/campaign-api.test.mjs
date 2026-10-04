@@ -76,7 +76,7 @@ for (const count of [1, 2, 3])
     assert.equal(r.state.stage, 10);
     assert.equal(r.state.campaign.status, "complete");
     assert.ok(r.state.finished >= r.state.started);
-    assert.deepEqual(r.state.crew.stationOwners, identity);
+    assert.deepEqual([...new Set(r.state.crew.stationOwners)].sort(), [...new Set(identity)].sort());
     assert.equal(r.state.campaign.seed, seed);
   });
 
@@ -87,7 +87,7 @@ test("only explicit new campaign rooms use 24-hour TTL, classic remains two hour
   assert.equal(h.rows.get(c.code).expires - h.now(), 86400000);
   assert.equal(h.rows.get(classic.code).expires - h.now(), 7200000);
   assert.equal(
-    (await h.request("create", { token: tokens[2], mode: "campaign-v2" }))
+    (await h.request("create", { token: tokens[2], mode: "campaign-v3" }))
       .status,
     400,
   );
@@ -364,6 +364,7 @@ test("offline operators block checks and hint release until explicit fewer-playe
 test("concurrent campaign hints reveal once and a finale sub-checkpoint survives rejoin", async () => {
   const h = harness();
   let [r] = await campaignRoom(h, 3);
+  const returningId = r.participantId;
   const votes = await Promise.all(
     tokens
       .slice(0, 3)
@@ -379,8 +380,8 @@ test("concurrent campaign hints reveal once and a finale sub-checkpoint survives
   const prior = copy(stored(h, r).campaign);
   await h.request("leave", { token: tokens[0], code: r.code });
   const rejoin = await h.request("join", { token: tokens[0], code: r.code });
-  assert.equal(rejoin.participantId, r.participantId);
-  assert.equal(rejoin.state.campaign.views[0].progress.step, 1);
+  assert.equal(rejoin.participantId, returningId);
+  assert.equal(rejoin.state.campaign.views[rejoin.roles[0]].progress.step, 1);
   assert.deepEqual(stored(h, r).campaign, prior);
 });
 
@@ -416,4 +417,129 @@ test("restartCount identifies only explicit current-level restarts across projec
   assert.equal(r.state.mode, "campaign-v1");
   assert.equal(r.state.campaign.restartCount, 0);
   assert.ok(r.state.started > started);
+});
+
+for (const count of [1, 2, 3]) test(`checkpoint rotation persists through retries, reconnect, restart and process reload (${count} players)`, async () => {
+  let h = harness();
+  let [r] = await campaignRoom(h, count);
+  const initial = copy(r.state.crew.stationOwners), coordinator = r.state.crew.coordinatorId;
+  r = await solvePhase(h, r);
+  const checkpoint = copy(r.state.crew);
+  r = await h.request('sync', { token: tokens[0], code: r.code });
+  assert.deepEqual(r.state.crew, checkpoint);
+  const next = cmd(r, 'campaign-next');
+  h.conflict(3);
+  r = await h.request('sync', { token: tokens[0], code: r.code, command: next });
+  assert.equal(r.status, 200, r.error);
+  const assigned = copy(r.state.crew);
+  assert.equal(assigned.coordinatorId, coordinator);
+  assert.equal(assigned.version, checkpoint.version + (count > 1 ? 1 : 0));
+  if (count === 3) assert.ok(assigned.stationOwners.every((id, role) => id !== initial[role]));
+  assert.deepEqual(r.state.hintVotes, {});
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const retry = await h.request('sync', { token: tokens[0], code: r.code, command: next });
+    assert.equal(retry.status, 200);
+    assert.equal(retry.state.stage, 1);
+    assert.deepEqual(retry.state.crew, assigned);
+  }
+  const oldControl = await h.request('sync', { token: tokens[0], code: r.code,
+    command: { ...next, id: 'old-control', type: 'campaign-set', role: 0, field: 'feed0', value: '1' } });
+  assert.equal(oldControl.errorCode, count > 1 ? 'STALE_ROSTER' : 'STALE_PUZZLE');
+  r = await act(h, r, 'campaign-restart');
+  assert.deepEqual(r.state.crew, assigned);
+  // Recreate the worker harness using only persisted JSON, as after a restart.
+  const row = copy(h.rows.get(r.code));
+  h = harness(); h.rows.set(r.code, row);
+  for (let i = 0; i < count; i++) {
+    r = await h.request('join', { token: tokens[i], code: r.code });
+    assert.deepEqual(r.state.crew, assigned);
+    assert.deepEqual(r.roles, assigned.stationOwners.flatMap((id, role) => id === r.participantId ? [role] : []));
+    assert.deepEqual(Object.keys(r.state.campaign.views), r.roles.map(String));
+  }
+  // Reset retains assigned ownership and rotation rather than drawing again.
+  r = await act(h, r, 'reset');
+  assert.deepEqual(r.state.crew, assigned);
+});
+
+for (const disconnect of ['leave', 'idle']) test(`checkpoint Continue reserves ${disconnect} owner until explicit fewer-player recovery`, async () => {
+  const h = harness();
+  let [r, b, c] = await campaignRoom(h, 3);
+  r = await solvePhase(h, r);
+  if (disconnect === 'leave') await h.request('leave', { token: tokens[2], code: r.code });
+  else h.advance(15001);
+  r = await h.request('sync', { token: tokens[0], code: r.code });
+  await h.request('sync', { token: tokens[1], code: r.code });
+  const before = copy(stored(h, r));
+  const blocked = await h.request('sync', { token: tokens[0], code: r.code, command: cmd(r, 'campaign-next') });
+  assert.equal(blocked.errorCode, 'STATIONS_RESERVED');
+  assert.deepEqual(stored(h, r), before);
+  // Returning before recovery retains the reserved station and checkpoint.
+  const returned = await h.request('join', { token: tokens[2], code: r.code });
+  assert.deepEqual(returned.state.crew.stationOwners, before.crew.stationOwners);
+  assert.equal(returned.state.campaign.status, 'checkpoint');
+  await h.request('leave', { token: tokens[2], code: r.code });
+  r = await h.request('continue', { token: tokens[0], code: r.code, rosterVersion: r.state.crew.version });
+  assert.equal(r.status, 200);
+  r = await act(h, r, 'campaign-next');
+  const late = await h.request('join', { token: tokens[2], code: r.code });
+  assert.deepEqual(late.roles, []);
+  assert.deepEqual(late.state.campaign.views, {});
+  r = await solvePhase(h, r);
+  r = await act(h, r, 'campaign-next');
+  assert.ok(!r.state.crew.stationOwners.includes(c.participantId), 'late observer is not silently readmitted');
+});
+
+test('simultaneous Continue requests commit exactly one assignment and checkpoint advance', async () => {
+  const h = harness();
+  let [r] = await campaignRoom(h, 3);
+  r = await solvePhase(h, r);
+  const next = cmd(r, 'campaign-next'), gate = h.holdNextUpdate();
+  const delayed = h.request('sync', { token: tokens[0], code: r.code, command: next });
+  await gate.entered;
+  const first = await h.request('sync', { token: tokens[0], code: r.code, command: next });
+  gate.release();
+  const retried = await delayed;
+  assert.equal(first.status, 200); assert.equal(retried.status, 200);
+  assert.deepEqual(retried.state.crew, first.state.crew);
+  assert.equal(retried.state.stage, 1);
+  assert.equal(retried.state.crew.version, r.state.crew.version + 1);
+  const separateClick = await h.request('sync', { token: tokens[0], code: r.code,
+    command: { ...next, id: 'separate-continue' } });
+  assert.equal(separateClick.errorCode, 'STALE_ROSTER');
+  assert.deepEqual(stored(h, r).crew, first.state.crew);
+});
+
+test('active campaign-v1 without rotation metadata keeps ownership until checkpoint Continue', async () => {
+  const h = harness();
+  let [r] = await campaignRoom(h, 3);
+  assert.equal(r.state.crew.rotation, undefined);
+  const initial = copy(r.state.crew.stationOwners);
+  r = await act(h, r, 'campaign-restart');
+  assert.deepEqual(r.state.crew.stationOwners, initial);
+  r = await solvePhase(h, r);
+  r = await act(h, r, 'campaign-next');
+  assert.equal(r.state.mode, 'campaign-v1');
+  assert.ok(r.state.crew.rotation);
+  const oldRole = initial.indexOf(r.participantId);
+  const denied = await h.request('sync', { token: tokens[0], code: r.code,
+    command: cmd(r, 'campaign-set', oldRole, { field: 'any', value: '1' }) });
+  assert.equal(denied.errorCode, 'NOT_STATION_OWNER');
+});
+
+test('three-player epoch rollover and finale phase transitions preserve persisted rotation', async () => {
+  const h = harness();
+  let [r] = await campaignRoom(h, 3);
+  r = await advanceTo(h, r, 1);
+  const assigned = copy(r.state.crew), epoch = r.state.epoch;
+  for (let i = 0; i < 66; i++)
+    r = await h.request('sync', { token: tokens[0], code: r.code, command: cmd(r, 'hint') });
+  assert.equal(r.status, 200);
+  assert.notEqual(r.state.epoch, epoch);
+  assert.deepEqual(r.state.crew, assigned);
+  r = await advanceTo(h, r, 9);
+  const finaleCrew = copy(r.state.crew);
+  r = await solvePhase(h, r);
+  assert.deepEqual(r.state.crew, finaleCrew);
+  r = await act(h, r, 'campaign-restart');
+  assert.deepEqual(r.state.crew, finaleCrew);
 });
