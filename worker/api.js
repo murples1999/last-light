@@ -139,6 +139,7 @@ function assignOwners(s, owners) {
   if (owners.every((id, role) => id === s.crew.stationOwners[role])) return;
   const previous = s.crew.stationOwners;
   s.crew.stationOwners = owners;
+  delete s.crew.rotation;
   rosterChanged(s, previous);
   s.online = owners.map((id) => Crew.isOnline(s, id));
 }
@@ -230,9 +231,13 @@ function command(s, id, c) {
     typeof c.type !== "string"
   )
     fail("Invalid command");
-  requireVersion(s, c.rosterVersion);
   const signature = fingerprint(c),
     replay = s.recent.find((x) => x.participantId === id && x.id === c.id);
+  // A committed Continue changes the roster version itself. Its exact receipt
+  // may be replayed safely; other old-role commands still require fresh ownership.
+  if (replay && c.type === "campaign-next" && replay.signature === signature)
+    return s;
+  requireVersion(s, c.rosterVersion);
   if (replay) {
     if (replay.signature !== signature)
       fail("Command ID already used for another action", 409, "COMMAND_REPLAY");
@@ -249,6 +254,12 @@ function command(s, id, c) {
       ["campaign-next", "campaign-restart"].includes(c.type)
     ) {
       requireCoordinator(s, id);
+      if (c.type === "campaign-next" && !Crew.allAssignedOnline(s))
+        fail(
+          "Wait for assigned operators, or explicitly continue with fewer players first",
+          409,
+          "STATIONS_RESERVED",
+        );
       try {
         c.type === "campaign-next"
           ? Campaign.next(s.campaign)
@@ -256,13 +267,20 @@ function command(s, id, c) {
       } catch (e) {
         fail(e.message);
       }
+      if (c.type === "campaign-next") {
+        const next = Crew.nextRotation(s.crew.stationOwners, s.crew.rotation);
+        assignOwners(s, next.owners);
+        s.crew.rotation = next.rotation;
+      }
       s.stage = s.campaign.level;
       s.epoch = crypto.randomUUID();
       s.hintVotes = {};
       s.locks = [false, false, false];
       s.feedback =
         c.type === "campaign-next"
-          ? "Next system online. Compare your new station notes."
+          ? Crew.voteEligibleIds(s).length > 1
+            ? "Next system online. Stations reassigned — check your assignment and new notes."
+            : "Next system online. You still operate all three stations."
           : "Current level restarted. Revealed hints are preserved.";
     } else {
       if (s.stage >= (s.mode === "campaign-v1" ? Campaign.TOTAL : 3))
